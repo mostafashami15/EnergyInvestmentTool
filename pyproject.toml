@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "energyinvestmenttool"
+version = "0.1.0"
+description = "Energy Investment Decision Support System"
+authors = ["mostafa shami <mostafashami15@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+flask = "^3.1.0"
+flask-cors = "^5.0.1"
+numpy = "^2.2.4"
+requests = "^2.32.3"
+python-dotenv = "^1.1.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
