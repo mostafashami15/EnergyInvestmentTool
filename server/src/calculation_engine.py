@@ -12,8 +12,14 @@ import math
 
 # Add the parent directory to the path to import config and data sources
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data_sources.nrel import NRELDataSource
-from data_sources.nasa import NASAPowerDataSource
+# Relative imports when running from within the package
+try:
+    from .data_sources.nrel import NRELDataSource
+    from .data_sources.nasa import NASAPowerDataSource
+except ImportError:
+    # Absolute imports for when this file is run directly
+    from data_sources.nrel import NRELDataSource
+    from data_sources.nasa import NASAPowerDataSource
 import config
 
 class CalculationEngine:

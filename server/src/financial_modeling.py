@@ -83,6 +83,7 @@ class FinancialModel:
                 "loan_amount": 0,
                 "down_payment": system_cost,
                 "monthly_payment": 0,
+                "annual_payment": 0,
                 "total_payments": 0,
                 "total_interest": 0,
                 "loan_fees": 0,
@@ -333,36 +334,91 @@ class FinancialModel:
             "yearly_cash_flows": yearly_cash_flows
         }
     
-    def _calculate_irr(self, cash_flows: List[float], guess: float = 0.1) -> float:
-        """Calculate Internal Rate of Return using iterative approach.
+    def _calculate_irr(self, cash_flows, max_iterations=100, tolerance=1e-6):
+        """
+        Calculate Internal Rate of Return using iterative approach.
         
         Args:
-            cash_flows: List of cash flows (negative for investments, positive for returns)
-            guess: Initial guess for IRR
+            cash_flows: List of cash flows, starting with initial investment (negative)
+            max_iterations: Maximum number of iterations
+            tolerance: Convergence tolerance
             
         Returns:
-            IRR as a decimal (e.g., 0.08 for 8%)
+            IRR as a decimal (e.g., 0.05 for 5%)
         """
-        tolerance = 0.0001
-        max_iterations = 100
-        rate = guess
+        # Basic validation
+        if not cash_flows or len(cash_flows) < 2:
+            return 0.0
         
-        for i in range(max_iterations):
-            npv = sum(cf / ((1 + rate) ** t) for t, cf in enumerate(cash_flows))
-            if abs(npv) < tolerance:
-                return rate
-            
-            # First derivative of NPV function
-            d_npv = sum(-t * cf / ((1 + rate) ** (t + 1)) for t, cf in enumerate(cash_flows) if t > 0)
-            
-            # Newton's method update
-            rate = rate - npv / d_npv if d_npv != 0 else rate * 1.1
-            
-            # Check for convergence
-            if abs(npv) < tolerance:
-                return rate
+        # Check if calculation is possible
+        if all(cf <= 0 for cf in cash_flows) or all(cf >= 0 for cf in cash_flows):
+            return 0.0  # No solution possible if all cash flows are same sign
         
-        # If we didn't converge, return the best estimate
+        # Start with a reasonable guess
+        rate = 0.1  # 10% initial guess
+        
+        # Newton's method converges quadratically for well-behaved functions
+        for _ in range(max_iterations):
+            try:
+                # Calculate NPV at current rate
+                npv = 0
+                for t, cf in enumerate(cash_flows):
+                    # Use safer calculation to avoid overflow
+                    if t == 0:
+                        npv += cf
+                    else:
+                        # Limit the exponent to avoid overflow
+                        if t > 100 or (1 + rate) ** t > 1e100:
+                            denominator = float('inf')
+                        else:
+                            denominator = (1 + rate) ** t
+                        npv += cf / denominator
+                
+                # If NPV is very close to zero, we've found the IRR
+                if abs(npv) < tolerance:
+                    return rate
+                
+                # Calculate derivative of NPV function
+                dnpv = 0
+                for t, cf in enumerate(cash_flows):
+                    if t > 0:  # Skip initial investment
+                        try:
+                            # Safer derivative calculation
+                            if t > 100 or (1 + rate) ** (t + 1) > 1e100:
+                                continue
+                            dnpv -= t * cf / ((1 + rate) ** (t + 1))
+                        except (OverflowError, ZeroDivisionError):
+                            continue
+                
+                # Avoid division by zero
+                if abs(dnpv) < 1e-10:
+                    # Adjust rate by a small amount and try again
+                    rate = rate + 0.01
+                    continue
+                
+                # Newton's method formula: r_next = r - f(r) / f'(r)
+                new_rate = rate - npv / dnpv
+                
+                # Sanity check on new rate
+                if new_rate <= -1 or new_rate > 1:
+                    # If the rate goes out of reasonable bounds, constrain it
+                    new_rate = max(min(new_rate, 0.5), -0.5)
+                
+                # Check for convergence
+                if abs(new_rate - rate) < tolerance:
+                    return new_rate
+                
+                rate = new_rate
+                
+            except (OverflowError, ZeroDivisionError, ValueError):
+                # If we encounter numerical issues, try a different approach
+                rate = rate * 0.9  # Try a smaller rate
+                
+                # If rate gets too small, return a default value
+                if abs(rate) < 1e-6:
+                    return 0.0
+        
+        # If we couldn't converge, return the best estimate
         return rate
     
     def perform_scenario_analysis(self,

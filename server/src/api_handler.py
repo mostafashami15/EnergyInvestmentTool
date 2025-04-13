@@ -15,8 +15,8 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import calculation modules
-from calculation_engine import CalculationEngine
-from financial_modeling import FinancialModel
+from server.src.calculation_engine import CalculationEngine
+from server.src.financial_modeling import FinancialModel
 
 # Create Flask app
 app = Flask(__name__)
