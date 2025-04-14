@@ -9,22 +9,78 @@ from flask_cors import CORS
 import os
 import sys
 import json
+import hashlib
 from datetime import datetime
+from functools import wraps
+from auth_manager import AuthManager, token_required
+from db_manager import DatabaseManager
+from cache_manager import CacheManager
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import calculation modules
-from server.src.calculation_engine import CalculationEngine
-from server.src.financial_modeling import FinancialModel
+try:
+    from calculation_engine import CalculationEngine
+    from financial_modeling import FinancialModel
+except ImportError:
+    # Adjust import path based on project structure
+    from server.src.calculation_engine import CalculationEngine
+    from server.src.financial_modeling import FinancialModel
 
 # Create Flask app
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
+# Initialize managers
+auth_manager = AuthManager()
+db_manager = DatabaseManager()
+cache_manager = CacheManager()
+
 # Initialize calculation modules
 calculation_engine = CalculationEngine()
 financial_model = FinancialModel()
+
+# Add cache middleware to wrap API responses in caching logic
+def cache_middleware(namespace, tier='short'):
+    def decorator(f):
+        @wraps(f)
+        def wrapped(*args, **kwargs):
+            # Check if path parameters are in kwargs
+            params = {}
+            for key, value in kwargs.items():
+                if key != 'user_id' and key != 'username':  # Skip auth params
+                    params[key] = value
+                    
+            # Add query parameters from request
+            for key, value in request.args.items():
+                params[key] = value
+                
+            # For POST/PUT requests, add a hash of the body
+            if request.method in ['POST', 'PUT'] and request.is_json:
+                body_hash = hashlib.md5(json.dumps(request.get_json(), sort_keys=True).encode()).hexdigest()
+                params['body_hash'] = body_hash
+            
+            # Try to get cached response
+            cached_response = cache_manager.get(namespace, params, tier)
+            if cached_response:
+                return jsonify(cached_response)
+            
+            # Call the original function
+            result = f(*args, **kwargs)
+            
+            # Cache the result if it's a JSON response
+            if isinstance(result, tuple):
+                response, status_code = result
+                if status_code == 200 and hasattr(response, 'get_json'):
+                    cache_manager.set(namespace, params, response.get_json(), tier)
+            else:
+                if hasattr(result, 'get_json'):
+                    cache_manager.set(namespace, params, result.get_json(), tier)
+            
+            return result
+        return wrapped
+    return decorator
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -36,6 +92,7 @@ def health_check():
     })
 
 @app.route('/api/solar-resource', methods=['GET'])
+@cache_middleware('solar_resource', 'long')  # Cache solar resource data for 30 days
 def get_solar_resource():
     """Get solar resource data for a specific location."""
     # Get parameters from request
@@ -55,6 +112,7 @@ def get_solar_resource():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/utility-rates', methods=['GET'])
+@cache_middleware('utility_rates', 'medium')  # Cache utility rates for 1 day
 def get_utility_rates():
     """Get utility rate data for a specific location."""
     # Get parameters from request
@@ -74,6 +132,7 @@ def get_utility_rates():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/calculate-production', methods=['POST'])
+@cache_middleware('production_calculation', 'medium')  # Cache calculations for 1 day
 def calculate_production():
     """Calculate solar energy production for given parameters."""
     # Get JSON data from request
@@ -273,32 +332,238 @@ def scenario_analysis():
 
 @app.route('/api/sensitivity-analysis', methods=['POST'])
 def sensitivity_analysis():
-    """Perform sensitivity analysis for key parameters."""
-    # Get JSON data from request
+    """Perform sensitivity analysis for given parameters."""
     try:
         data = request.get_json()
         
-        # Extract required parameters
-        system_capacity = float(data.get('systemCapacity', 4.0))
-        annual_production = float(data.get('annualProduction'))
-        electricity_rate = float(data.get('electricityRate', 0.12))
+        # Import the sensitivity analyzer
+        from sensitivity_analyzer import SensitivityAnalyzer
         
-        # Optional financial parameters
-        params = data.get('financialParams', {})
+        # Create analyzer with existing calculation engine and financial model
+        analyzer = SensitivityAnalyzer(calculation_engine, financial_model)
         
-    except (TypeError, ValueError) as e:
-        return jsonify({'error': f'Invalid parameter: {str(e)}'}), 400
-    
-    try:
-        # Use financial model to perform sensitivity analysis
-        sensitivity = financial_model.perform_sensitivity_analysis(
-            system_capacity, annual_production, electricity_rate, params
-        )
+        # Extract base parameters from request
+        base_params = data.get('base_params', {})
+        analysis_type = data.get('analysis_type', 'tornado')
         
-        # Return data
-        return jsonify(sensitivity)
+        if analysis_type == 'tornado':
+            # Generate tornado chart data
+            result = analyzer.analyze_multiple_parameters(base_params)
+        elif analysis_type == 'scenario':
+            # Compare predefined scenarios
+            scenarios = data.get('scenarios', {})
+            result = analyzer.compare_scenarios(base_params, scenarios)
+        elif analysis_type == 'custom':
+            # Create custom scenario
+            custom_params = data.get('custom_params', {})
+            result = analyzer.create_custom_scenario(base_params, custom_params)
+        else:
+            return jsonify({'error': 'Invalid analysis type'}), 400
+            
+        return jsonify(result)
+        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+# Authentication endpoints
+@app.route('/api/auth/register', methods=['POST'])
+def register():
+    """Register a new user."""
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        email = data.get('email')
+        password = data.get('password')
+        
+        if not username or not email or not password:
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        user = auth_manager.register_user(username, email, password)
+        return jsonify(user)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    """Authenticate a user and return a token."""
+    try:
+        data = request.get_json()
+        username_or_email = data.get('username_or_email')
+        password = data.get('password')
+        
+        if not username_or_email or not password:
+            return jsonify({'error': 'Missing username/email or password'}), 400
+        
+        user = auth_manager.login_user(username_or_email, password)
+        return jsonify(user)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 401
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/auth/verify', methods=['GET'])
+@token_required
+def verify_token(user_id, username):
+    """Verify a user's authentication token."""
+    try:
+        user = auth_manager.get_user_profile(user_id)
+        return jsonify(user)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 401
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Project management endpoints
+@app.route('/api/projects', methods=['GET'])
+@token_required
+def get_projects(user_id, username):
+    """Get all projects for the current user."""
+    try:
+        projects = db_manager.get_user_projects(user_id)
+        return jsonify({'projects': projects})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/projects/<project_id>', methods=['GET'])
+@token_required
+def get_project(project_id, user_id, username):
+    """Get a project by ID."""
+    try:
+        project = db_manager.get_project(project_id, user_id)
+        if not project:
+            return jsonify({'error': 'Project not found'}), 404
+        return jsonify(project)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/projects', methods=['POST'])
+@token_required
+def create_project(user_id, username):
+    """Create a new project."""
+    try:
+        data = request.get_json()
+        
+        if not data.get('name'):
+            return jsonify({'error': 'Project name is required'}), 400
+        
+        project_id = db_manager.save_project(
+            user_id=user_id,
+            name=data.get('name'),
+            description=data.get('description'),
+            location_lat=data.get('location_lat'),
+            location_lon=data.get('location_lon'),
+            parameters=data.get('parameters'),
+            results=data.get('results')
+        )
+        
+        project = db_manager.get_project(project_id)
+        return jsonify(project), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/projects/<project_id>', methods=['PUT'])
+@token_required
+def update_project(project_id, user_id, username):
+    """Update an existing project."""
+    try:
+        # First check if project exists and belongs to user
+        existing_project = db_manager.get_project(project_id, user_id)
+        if not existing_project:
+            return jsonify({'error': 'Project not found'}), 404
+        
+        data = request.get_json()
+        
+        if not data.get('name'):
+            return jsonify({'error': 'Project name is required'}), 400
+        
+        db_manager.save_project(
+            user_id=user_id,
+            name=data.get('name'),
+            description=data.get('description'),
+            location_lat=data.get('location_lat'),
+            location_lon=data.get('location_lon'),
+            parameters=data.get('parameters'),
+            results=data.get('results'),
+            project_id=project_id
+        )
+        
+        updated_project = db_manager.get_project(project_id)
+        return jsonify(updated_project)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/projects/<project_id>', methods=['DELETE'])
+@token_required
+def delete_project(project_id, user_id, username):
+    """Delete a project."""
+    try:
+        result = db_manager.delete_project(project_id, user_id)
+        if not result:
+            return jsonify({'error': 'Project not found'}), 404
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Admin cache endpoints
+@app.route('/api/admin/cache/stats', methods=['GET'])
+@token_required
+def get_cache_stats(user_id, username):
+    """Get cache statistics."""
+    # Check if user is admin (implement your admin check)
+    is_admin = True  # Replace with actual admin check
+    if not is_admin:
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    stats = cache_manager.get_stats()
+    return jsonify(stats)
+
+@app.route('/api/admin/cache/clear', methods=['POST'])
+@token_required
+def clear_cache(user_id, username):
+    """Clear the cache."""
+    # Check if user is admin
+    is_admin = True  # Replace with actual admin check
+    if not is_admin:
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    data = request.get_json()
+    tier = data.get('tier') if data else None
+    
+    count = cache_manager.clear(tier)
+    return jsonify({'success': True, 'count': count})
+
+@app.route('/api/admin/cache/invalidate', methods=['POST'])
+@token_required
+def invalidate_cache(user_id, username):
+    """Invalidate cache entries by namespace."""
+    # Check if user is admin
+    is_admin = True  # Replace with actual admin check
+    if not is_admin:
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    data = request.get_json()
+    if not data or 'namespace' not in data:
+        return jsonify({'error': 'Namespace is required'}), 400
+    
+    namespace = data['namespace']
+    key_components = data.get('key_components')
+    
+    count = cache_manager.invalidate(namespace, key_components)
+    return jsonify({'success': True, 'count': count})
+
+@app.route('/api/admin/cache/cleanup', methods=['POST'])
+@token_required
+def cleanup_cache(user_id, username):
+    """Clean up expired cache entries."""
+    # Check if user is admin
+    is_admin = True  # Replace with actual admin check
+    if not is_admin:
+        return jsonify({'error': 'Admin access required'}), 403
+    
+    count = cache_manager.cleanup_expired()
+    return jsonify({'success': True, 'count': count})
 
 if __name__ == '__main__':
     # Run the Flask app
