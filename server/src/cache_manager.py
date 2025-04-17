@@ -27,20 +27,13 @@ logger = logging.getLogger('cache_manager')
 
 class CacheManager:
     """Manages multi-tiered caching for API responses and calculation results."""
-    
+        
     def __init__(self, 
                 db_path: Optional[str] = None,
                 memory_cache_size: int = 1000,
                 enable_memory_cache: bool = True,
                 enable_disk_cache: bool = True):
-        """Initialize the cache manager.
         
-        Args:
-            db_path: Path to SQLite database for persistent cache
-            memory_cache_size: Maximum number of items in memory cache
-            enable_memory_cache: Whether to use memory caching
-            enable_disk_cache: Whether to use disk caching
-        """
         self.memory_cache_size = memory_cache_size
         self.enable_memory_cache = enable_memory_cache
         self.enable_disk_cache = enable_disk_cache
@@ -60,11 +53,7 @@ class CacheManager:
         # Disk cache (medium/long-term)
         self.db_path = db_path or os.environ.get('CACHE_DB_PATH', 'cache.db')
         
-        # Initialize disk cache if enabled
-        if self.enable_disk_cache:
-            self._init_disk_cache()
-        
-        # Cache tier configurations
+        # Cache tier configurations - MAKE SURE THIS IS DEFINED BEFORE _init_disk_cache()
         self.cache_tiers = {
             'short': {
                 'ttl': 3600,  # 1 hour
@@ -79,6 +68,10 @@ class CacheManager:
                 'description': 'Long-term cache for slow-changing data like solar radiation'
             }
         }
+        
+        # Initialize disk cache if enabled
+        if self.enable_disk_cache:
+            self._init_disk_cache()
         
         logger.info(f"Cache manager initialized with memory size: {memory_cache_size}, " + 
                     f"memory cache: {enable_memory_cache}, disk cache: {enable_disk_cache}")
